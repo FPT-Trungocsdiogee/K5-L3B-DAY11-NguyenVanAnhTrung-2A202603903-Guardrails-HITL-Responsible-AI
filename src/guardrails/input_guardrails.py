@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -51,16 +52,39 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    # Phrase-level signals, matched anywhere in the canonicalized text
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"\b(ignore|disregard|forget)\s+(all\s+)?((the|your|any\s+)?(previous|prior|above|earlier)\s+)?(instructions|rules|prompts?)\b",
+        r"\byou\s+are\s+now\b",
+        r"\bsystem\s+prompt\b",
+        r"\breveal\s+(your|the)\s+(\w+\s+)?(instructions|prompt|rules)\b",
+        r"\bpretend\s+(you\s+are|to\s+be)\b",
+        r"\bact\s+as\s+(a\s+|an\s+)?unrestricted\b",
+        # Vietnamese variants
+        r"\bbỏ\s+qua\s+(mọi\s+|tất\s+cả\s+)?(các\s+)?(hướng\s+dẫn|chỉ\s+dẫn|lệnh)\b",
+        r"\btiết\s+lộ\s+(mật\s+khẩu|hướng\s+dẫn|lời\s+nhắc|prompt)\b",
     ]
 
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
-            return "BLOCK"
+    # Check both canonical forms: invisible chars removed ("Ig​nore")
+    # and invisible chars as spaces ("Ignore​all").
+    variants = {_canonicalize(user_input, " "), _canonicalize(user_input, "")}
+    for text in variants:
+        for pattern in INJECTION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return "BLOCK"
     return "ALLOW"
+
+
+# Zero-width / invisible characters attackers use to split keywords
+_INVISIBLE_CHARS = re.compile(r"[​-‏⁠-⁤﻿­]")
+
+
+def _canonicalize(text: str, invisible_replacement: str) -> str:
+    """Normalize Unicode look-alikes, replace invisible chars, collapse whitespace."""
+    text = unicodedata.normalize("NFKC", text)
+    text = _INVISIBLE_CHARS.sub(invisible_replacement, text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().lower()
 
 
 # ============================================================
@@ -86,12 +110,16 @@ def topic_filter(user_input: str) -> InputStatus:
     """
     input_lower = user_input.lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    # 1. Blocked topics win, even if a banking keyword is also present
+    if any(topic in input_lower for topic in BLOCKED_TOPICS):
+        return "BLOCK"
 
-    pass  # Replace with your implementation
+    # 2. Off-topic: no banking keyword at all
+    if not any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return "BLOCK"
+
+    # 3. Banking-related and not blocked
+    return "ALLOW"
 
 
 # ============================================================
@@ -150,8 +178,16 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         # 2. Call topic_filter(text)
         #    - If "BLOCK": increment blocked_count, return self._block_response("...")
         # 3. If both return "ALLOW": return None (let message through)
-
-        pass  # Replace with your implementation
+        if (detect_injection(text) == "BLOCK") or (topic_filter(text) == "BLOCK"):
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm sorry, I can't help with that request. I can only assist "
+                "with VinBank banking topics such as accounts, transactions, "
+                "transfers, loans, savings, interest rates and credit cards."
+            )
+        else:
+            return None
+        # Replace with your implementation
 
 
 # ============================================================
